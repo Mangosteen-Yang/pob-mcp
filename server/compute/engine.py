@@ -227,6 +227,21 @@ class PobEngine:
     def dealloc_passive(self, node: str | int) -> dict[str, Any]:
         return self.call("dealloc_passive", node=node)
 
+    def rank_passive_contributions(
+        self,
+        metric: str = "TotalDPS",
+        limit: int = 10,
+        node_type: str | None = None,
+        include_ascendancy: bool = True,
+    ) -> dict[str, Any]:
+        return self.call(
+            "rank_passive_contributions",
+            metric=metric,
+            limit=limit,
+            node_type=node_type,
+            include_ascendancy=include_ascendancy,
+        )
+
     def optimize_passives(
         self,
         metric: str = "TotalDPS",
