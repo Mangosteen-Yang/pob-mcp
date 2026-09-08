@@ -666,7 +666,10 @@ def alloc_passive(node: str | int) -> dict[str, Any]:
 def dealloc_passive(node: str | int) -> dict[str, Any]:
     """Deallocate a passive node (and nodes that depend on it) by id or name.
 
-    Returns points freed and the resulting stat deltas.
+    Returns points freed and the resulting stat deltas. NOT reversible by `alloc_passive`: that
+    re-routes by SHORTEST path, which can take a different route than the one just removed. To
+    probe a removal and put the tree back exactly as it was, snapshot with `get_xml` first and
+    reload it — or use `rank_passive_contributions`, which measures removals without mutating.
     """
     return get_engine().dealloc_passive(node)
 

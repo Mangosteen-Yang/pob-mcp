@@ -282,18 +282,19 @@ def test_rank_contributions_matches_a_real_dealloc(engine):
     dealloc removes the same single node the what-if simulated.
     """
     b = _tree_build(engine)
+    # Restore by RELOADING, never by alloc_passive: alloc re-routes by shortest path, which can
+    # take a different route than the one just removed and silently drift the tree between probes.
+    xml = b.get_xml()
     base = b.get_stats(["TotalDPS"])["stats"]["TotalDPS"]
     ranked = b.rank_passive_contributions(metric="TotalDPS", limit=40)["results"]
 
     for node in ranked:
         if node["delta"] <= 0 or node.get("ascendancy"):
             continue
+        b.load_build_xml(xml)
         d = b.dealloc_passive(node["id"])
-        if not d.get("ok"):
-            continue
-        if d["pointsFreed"] != 1:  # cascaded — not the single-node case we're checking
-            b.alloc_passive(node["id"])
-            continue
+        if not d.get("ok") or d["pointsFreed"] != 1:
+            continue  # cascaded (or gone) — not the single-node case we're checking
         after = b.get_stats(["TotalDPS"])["stats"]["TotalDPS"]
         assert base - after == pytest.approx(node["delta"], rel=1e-6)
         return
