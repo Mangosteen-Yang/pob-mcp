@@ -52,6 +52,7 @@
     { "name": "alloc_passive", "description": "Allocate a passive node (auto-routed)." },
     { "name": "dealloc_passive", "description": "Deallocate a passive node." },
     { "name": "optimize_passives", "description": "Allocate points to maximize a stat, 'balanced', or weighted goals; can require nodes." },
+    { "name": "rank_passive_contributions", "description": "Rank the allocated passive nodes by how much each contributes to a stat (PoB node-power calc)." },
     { "name": "scaffold_gear", "description": "Fill empty defensive slots with placeholder gear to close resist/pool gaps." },
     { "name": "optimize_item", "description": "Craft the best-in-slot rare for a slot — one metric, or a weighted goals blend (e.g. DPS+EHP); reports per-affix attainability (ilvl/tier) + a craft-effort estimate." },
     { "name": "rank_upgrades", "description": "Rank gear slots by how much recrafting each would gain — what to upgrade next." },

@@ -666,9 +666,49 @@ def alloc_passive(node: str | int) -> dict[str, Any]:
 def dealloc_passive(node: str | int) -> dict[str, Any]:
     """Deallocate a passive node (and nodes that depend on it) by id or name.
 
-    Returns points freed and the resulting stat deltas.
+    Returns points freed and the resulting stat deltas. NOT reversible by `alloc_passive`: that
+    re-routes by SHORTEST path, which can take a different route than the one just removed. To
+    probe a removal and put the tree back exactly as it was, snapshot with `get_xml` first and
+    reload it — or use `rank_passive_contributions`, which measures removals without mutating.
     """
     return get_engine().dealloc_passive(node)
+
+
+@mcp.tool()
+def rank_passive_contributions(
+    metric: str = "TotalDPS",
+    limit: int = 10,
+    node_type: str | None = None,
+    include_ascendancy: bool = True,
+) -> dict[str, Any]:
+    """Rank the active build's ALLOCATED passive nodes by how much each contributes to a metric.
+
+    Engine-computed (not looked up): for every allocated node the engine recalculates the build
+    *without* that node and reports the drop. This is PoB's own node-power mechanism, so the
+    numbers are the ones the PoB GUI's power report would show.
+
+    `metric` is any stat on the build's output — "TotalDPS" (default), "FullDPS", "CombinedDPS",
+    "AverageDamage", "TotalEHP", "Life", ... `node_type` filters to one kind ("Notable",
+    "Keystone", "Mastery", "Normal"); omit it to rank every allocated node. Set
+    `include_ascendancy=False` to exclude ascendancy nodes.
+
+    Returns `baseValue` (the metric with the full tree), `nodesTested`, and `results` — the top
+    `limit` nodes each with `delta` (metric lost if that node alone were removed), `deltaPct`,
+    `without` (the metric with the node removed), plus the node's id/name/type/stats. `limit=0`
+    returns every allocated node.
+
+    Read `delta` as ONE node's marginal contribution to the tree as it stands, which is what
+    "which nodes carry my damage" means. It is NOT point-efficiency: the deltas are measured
+    against the intact tree, so they do not sum to the tree's total damage (multiplicative
+    modifiers overlap) and removing a node here does not re-path the tree the way
+    `dealloc_passive` does. Requires a build with an allocated tree and a main skill.
+    """
+    return get_engine().rank_passive_contributions(
+        metric=metric,
+        limit=limit,
+        node_type=node_type,
+        include_ascendancy=include_ascendancy,
+    )
 
 
 @mcp.tool()

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 
 def test_keystones_listed(fireball):
     ks = fireball.search_passives(node_type="Keystone", limit=5)["results"]
@@ -233,3 +235,100 @@ def test_engine_health_reports_versions():
     assert h["pong"] is True
     assert h["serverVersion"] and h["dataSource"] in {"bundled", "user-data"}
     assert h["treeVersion"]
+
+
+def _tree_build(engine):
+    """A real allocated tree to rank: Sorceress, Spark, an ascendancy notable + a small tree."""
+    engine.new_build()
+    engine.set_class("Sorceress", "Stormweaver")
+    engine.set_level(60)
+    engine.paste_skill("Spark 20/0  1")
+    # One ascendancy notable, picked by reachability rather than id so a tree bump can't stale it —
+    # the include_ascendancy filter needs an allocated ascendancy node to actually exclude.
+    asc = [
+        n
+        for n in engine.search_passives(node_type="Notable", limit=2000)["results"]
+        if n.get("ascendancy") and n.get("pathDist")
+    ]
+    assert asc, "no reachable ascendancy notable"
+    engine.alloc_passive(min(asc, key=lambda n: n["pathDist"])["id"])
+    engine.optimize_passives(metric="TotalDPS", points=20)
+    return engine
+
+
+def test_rank_contributions_ranks_allocated_nodes(engine):
+    b = _tree_build(engine)
+    base = b.get_stats(["TotalDPS"])["stats"]["TotalDPS"]
+    r = b.rank_passive_contributions(metric="TotalDPS", limit=5)
+
+    assert r["ok"] and r["results"]
+    assert r["baseValue"] == pytest.approx(base, rel=1e-9)
+    assert len(r["results"]) <= 5 and r["nodesTested"] >= len(r["results"])
+    # sorted by contribution, descending
+    deltas = [n["delta"] for n in r["results"]]
+    assert deltas == sorted(deltas, reverse=True)
+    # the top node on a DPS-optimized tree must actually carry damage
+    assert deltas[0] > 0
+    top = r["results"][0]
+    assert top["name"] and top["id"] and top["type"]
+    assert top["without"] == pytest.approx(base - top["delta"], rel=1e-9)
+    assert top["deltaPct"] == pytest.approx(top["delta"] / base * 100, rel=1e-9)
+
+
+def test_rank_contributions_matches_a_real_dealloc(engine):
+    """The what-if delta must equal what removing the node really costs.
+
+    Checked on a node whose removal frees exactly one point (no dependents), so the real
+    dealloc removes the same single node the what-if simulated.
+    """
+    b = _tree_build(engine)
+    # Restore by RELOADING, never by alloc_passive: alloc re-routes by shortest path, which can
+    # take a different route than the one just removed and silently drift the tree between probes.
+    xml = b.get_xml()
+    base = b.get_stats(["TotalDPS"])["stats"]["TotalDPS"]
+    ranked = b.rank_passive_contributions(metric="TotalDPS", limit=40)["results"]
+
+    for node in ranked:
+        if node["delta"] <= 0 or node.get("ascendancy"):
+            continue
+        b.load_build_xml(xml)
+        d = b.dealloc_passive(node["id"])
+        if not d.get("ok") or d["pointsFreed"] != 1:
+            continue  # cascaded (or gone) — not the single-node case we're checking
+        after = b.get_stats(["TotalDPS"])["stats"]["TotalDPS"]
+        assert base - after == pytest.approx(node["delta"], rel=1e-6)
+        return
+    pytest.skip("no dependent-free contributing node on this tree")
+
+
+def test_rank_contributions_filters_and_bad_metric(engine):
+    b = _tree_build(engine)
+
+    notables = b.rank_passive_contributions(metric="TotalDPS", limit=5, node_type="Notable")
+    assert notables["ok"]
+    assert all(n["type"] == "Notable" for n in notables["results"])
+
+    no_asc = b.rank_passive_contributions(metric="TotalDPS", limit=50, include_ascendancy=False)
+    assert all(not n.get("ascendancy") for n in no_asc["results"])
+    # ascendancy nodes are allocated on this build, so excluding them tests strictly fewer nodes
+    with_asc = b.rank_passive_contributions(metric="TotalDPS", limit=50)
+    assert with_asc["nodesTested"] > no_asc["nodesTested"]
+
+    bad = b.rank_passive_contributions(metric="NotARealStat")
+    assert bad["ok"] is False and "NotARealStat" in bad["error"]
+
+
+def test_rank_contributions_zero_metric_explains_itself(engine):
+    # A metric the build has none of (Ward) makes every delta 0 — the ranking must say why rather
+    # than hand back a page of silent zeros.
+    b = _tree_build(engine)
+    assert b.get_stats(["Ward"])["stats"]["Ward"] == 0
+    r = b.rank_passive_contributions(metric="Ward")
+    assert r["ok"] and r["baseValue"] == 0
+    assert "note" in r and "0 on this build" in r["note"]
+
+
+def test_rank_contributions_limit_zero_returns_all(engine):
+    b = _tree_build(engine)
+    r = b.rank_passive_contributions(metric="TotalDPS", limit=0)
+    assert len(r["results"]) == r["nodesTested"] > 10

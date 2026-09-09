@@ -10,7 +10,7 @@
 
 ## Status — v1 functionally complete (2026-06)
 
-M0–M5 are implemented and verified: 64 MCP tools (compute, passives, corpus, live ops, optimize,
+M0–M5 are implemented and verified: 65 MCP tools (compute, passives, corpus, live ops, optimize,
 gear-crafting & build-maxing, self-update) with a golden-build pytest suite. Self-update (from
 validated releases) and a self-contained per-OS `.mcpb` pipeline ship in tagged CI releases.
 Recent surface: blended `optimize_item` (`goals`) with attainability/craft-effort,
@@ -212,6 +212,7 @@ holds a **build session** (current XML state) and mutates it via RPC.
 - `evaluate_build(goals)` — pass/fail vs named targets (e.g. `boss_dps >= 500k`,
   `life >= 5000`, `all_res capped`, `budget <= 10div`); composes stats + prices + validation
 - `optimize` — bounded greedy/beam search over the engine (best-effort)
+- `rank_passive_contributions` — attribute a stat across the allocated tree, node by node
 
 **Live ops**
 - `get_prices` — poe.ninja economy, league-scoped

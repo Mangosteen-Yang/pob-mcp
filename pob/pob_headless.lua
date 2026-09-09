@@ -1411,6 +1411,94 @@ function methods.optimize_passives(p)
 	return result
 end
 
+-- Rank the ALLOCATED passive nodes by how much each one contributes to a metric, using PoB's
+-- own power calculation: for each allocated node, ask the what-if calculator for the build
+-- WITHOUT that node and take the drop. This is the same `removeNodes` mechanism the GUI's
+-- power report uses (CalcsTab.lua), so the numbers are the engine's, not ours.
+function methods.rank_passive_contributions(p)
+	p = p or {}
+	local metric = p.metric or "TotalDPS"
+	local limit = p.limit or 10
+	local wantType = p.node_type
+	local includeAsc = p.include_ascendancy
+	if includeAsc == nil then includeAsc = true end
+
+	local spec = build.spec
+	if not spec then return { ok = false, error = "no passive tree on the active build" } end
+
+	local calcFunc, calcBase = build.calcsTab:GetMiscCalculator(build)
+	local base = calcBase[metric]
+	if type(base) ~= "number" then
+		return {
+			ok = false,
+			error = "metric '" .. tostring(metric) .. "' is not a number on this build's output",
+		}
+	end
+
+	-- Stable candidate order (id) so equal-contribution nodes rank deterministically — `pairs`
+	-- order is unspecified and drifts between LuaJIT builds/platforms.
+	local cands = {}
+	for _, node in pairs(spec.allocNodes) do
+		local skip = node.type == "ClassStart" or node.type == "AscendClassStart"
+		if not skip and wantType and node.type ~= wantType then skip = true end
+		if not skip and node.ascendancyName and not includeAsc then skip = true end
+		if not skip then cands[#cands + 1] = node end
+	end
+	table.sort(cands, function(a, b) return (a.id or 0) < (b.id or 0) end)
+
+	local ranked = {}
+	for _, node in ipairs(cands) do
+		local out = calcFunc({ removeNodes = { [node] = true } })
+		local without = out[metric] or 0
+		local delta = base - without
+		ranked[#ranked + 1] = {
+			id = node.id,
+			name = node.name,
+			type = node.type,
+			ascendancy = node.ascendancyName,
+			stats = node.sd,
+			without = without,
+			delta = delta,
+			deltaPct = (base > 0) and (delta / base * 100) or 0,
+		}
+	end
+
+	-- Biggest contribution first; ties broken by id for a deterministic order.
+	table.sort(ranked, function(a, b)
+		if a.delta ~= b.delta then return a.delta > b.delta end
+		return (a.id or 0) < (b.id or 0)
+	end)
+
+	-- limit <= 0 means "every node", matching optimize_passives' points=0 = "the whole budget".
+	if limit <= 0 then limit = #ranked end
+	local top = {}
+	local summed = 0
+	for i = 1, math.min(limit, #ranked) do
+		top[i] = ranked[i]
+		summed = summed + ranked[i].delta
+	end
+
+	local res = {
+		ok = true,
+		metric = metric,
+		baseValue = base,
+		nodesTested = #ranked,
+		topContribution = summed,
+		results = top,
+	}
+	-- base 0 makes every delta 0 — the ranking is vacuous, so say why rather than return zeros.
+	if base <= 0 then
+		res.note = "'"
+			.. metric
+			.. "' is 0 on this build, so no node can contribute to it. Set a main skill (and gear) "
+			.. "first, or rank a metric the build actually has."
+	elseif #ranked == 0 then
+		res.note = "No allocated passive nodes matched — the tree is empty, or node_type / "
+			.. "include_ascendancy filtered everything out."
+	end
+	return res
+end
+
 -- ---------------------------------------------------------------------------
 -- RPC loop
 -- ---------------------------------------------------------------------------

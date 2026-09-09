@@ -65,7 +65,7 @@ engine confirms the effect.
 
 **Stay current**: live currency/unique prices, corpus freshness checks, and one-click self-update.
 
-### The toolset (64 MCP tools)
+### The toolset (65 MCP tools)
 
 *Build / compute — real Path of Building numbers:*
 - `import_build(source)` — PoB share code, pobb.in/pastebin link, or raw XML
@@ -86,6 +86,7 @@ engine confirms the effect.
 - `search_passives(query?, node_type?)` / `get_passive(node)`
 - `alloc_passive(node)` / `dealloc_passive(node)` — allocate/route by id or name, with deltas
 - `optimize_passives(metric, points, goals?, require?)` — greedy allocation: one stat, `"balanced"`, or weighted `goals` (e.g. Life+Crit); can `require` nodes
+- `rank_passive_contributions(metric?, limit?, node_type?)` — rank the ALLOCATED nodes by how much each one contributes (PoB's own node-power calc): "which passives carry my damage"
 - `optimize_item(slot, metric?, goals?)` — craft a best-in-slot rare for one metric or a weighted `goals` blend (damage+defense); reports per-affix attainability (ilvl/tier) + craft-effort
 - `craft_item(slot, metric?, goals?)` — best-in-slot using the FULL crafting system: runes/soul cores + Perfect essences (beyond-pool mods) + corruptions, each engine-valued
 - `optimize_jewel(metric?, base?, goals?)` — craft the best rare jewel (then socket with `equip_jewel`)
