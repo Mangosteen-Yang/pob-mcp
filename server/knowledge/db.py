@@ -558,6 +558,82 @@ def illegal_affixes(base_name: str, affix_lines: list[str]) -> list[dict[str, An
     return out
 
 
+def _affix_index(base_tags: set[str]) -> dict[str, list[dict[str, Any]]]:
+    """normalized affix line -> the craftable mods that can roll on a base with `base_tags`."""
+    con = _conn()
+    rows = con.execute(
+        "SELECT text, type, tags, groups FROM mods "
+        "WHERE domain = 'item' AND type IN ('prefix','suffix')"
+    ).fetchall()
+    index: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        tags = set(json.loads(r["tags"] or "[]"))
+        if not tags or not (tags & base_tags):
+            continue
+        groups = json.loads(r["groups"] or "[]")
+        for ln in (r["text"] or "").split("\n"):
+            n = _norm_mod_line(ln)
+            if n:
+                index.setdefault(n, []).append({"type": r["type"], "groups": groups})
+    return index
+
+
+def affix_rule_violations(base_name: str, affix_lines: list[str]) -> list[dict[str, Any]]:
+    """Rare-item affix RULES broken by these lines: affix counts and mod-group exclusivity.
+
+    A rare carries at most 3 prefixes and 3 suffixes, and never two affixes from the same mod
+    group (e.g. "+X to Level of all Spell Skills" and "+X to Level of all Physical Spell Skills"
+    are both `IncreaseSocketedGemLevel`, so only one can roll). This complements
+    `illegal_affixes`, which only asks whether a mod can roll on the base at all.
+
+    Conservative by design: a line counts only when every craftable mod matching it on this base
+    agrees on its type and group, so implicits, rune lines, unique mods and unusual phrasings are
+    ignored rather than miscounted. Pass EXPLICIT affix lines only. Returns [] for unknown bases.
+    """
+    base = get_item(base_name)
+    if not base:
+        return []
+    base_tags = set(base.get("tags") or [])
+    if not base_tags:
+        return []
+    index = _affix_index(base_tags)
+    counts = {"prefix": 0, "suffix": 0}
+    by_group: dict[str, list[str]] = {}
+    for line in affix_lines:
+        cand = index.get(_norm_mod_line(line))
+        if not cand:
+            continue
+        types = {c["type"] for c in cand}
+        groups = {tuple(c["groups"]) for c in cand}
+        if len(types) != 1 or len(groups) != 1:
+            continue  # ambiguous — don't guess
+        counts[types.pop()] += 1
+        for g in groups.pop():
+            by_group.setdefault(g, []).append(line.strip())
+    out: list[dict[str, Any]] = []
+    for kind, limit in (("prefix", 3), ("suffix", 3)):
+        if counts[kind] > limit:
+            out.append(
+                {
+                    "rule": f"too many {kind}es" if kind == "prefix" else "too many suffixes",
+                    "detail": f"{counts[kind]} {kind}es on a rare {base_name} (max {limit})",
+                }
+            )
+    for group, lines in by_group.items():
+        if len(lines) > 1:
+            out.append(
+                {
+                    "rule": "mod group used more than once",
+                    "detail": (
+                        f"{len(lines)} affixes share the '{group}' mod group, which is "
+                        "mutually exclusive — only one can roll"
+                    ),
+                    "affixes": lines,
+                }
+            )
+    return out
+
+
 def _has_mechanics() -> bool:
     """Mechanics table exists only in schema_version >= 4 corpora (graceful on older data)."""
     con = _conn()
