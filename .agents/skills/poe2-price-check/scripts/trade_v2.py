@@ -463,9 +463,25 @@ class StatCatalog:
             _write_json_atomic(cache_path, payload)
         return cls.from_api(payload)
 
-    def resolve(self, modifier: ParsedModifier) -> tuple[StatEntry | None, str | None]:
+    def resolve(
+        self, modifier: ParsedModifier, *, prefer_local: bool = False
+    ) -> tuple[StatEntry | None, str | None]:
         domain = "explicit" if modifier.domain == "unique" else modifier.domain
         signature = modifier_signature(modifier.text)
+        # DEFENCE mods on gear that carries its own Armour/Evasion/Energy Shield are LOCAL, and
+        # the Trade catalog lists them as a separate "... (Local)" stat. PoB item text writes them
+        # exactly like the global variant ("+65 to maximum Energy Shield"), so a plain signature
+        # match silently picks the global id — which matches nothing on armour and returns zero
+        # results. Prefer the local entry when the item carries local defences.
+        #
+        # Scope this to defences only. Accuracy Rating and Attack Speed also have "(Local)" twins,
+        # but those are WEAPON-local: on gloves or a helmet the affix is global, so preferring the
+        # local id there would query a stat the piece can never roll — the same zero-results bug,
+        # just moved to another slot.
+        if prefer_local and _LOCAL_DEFENCE_STAT.search(signature):
+            local = self._by_key.get((domain, f"{signature} (local)"), [])
+            if len(local) == 1:
+                return local[0], None
         matches = self._by_key.get((domain, signature), [])
         if not matches and domain in {"crafted", "desecrated"}:
             matches = self._by_key.get(("explicit", signature), [])
@@ -497,6 +513,30 @@ def _matches_any(text: str, patterns: Iterable[str]) -> bool:
     return any(pattern.lower() in lowered for pattern in patterns)
 
 
+# Item classes whose defence affixes roll as LOCAL stats on Trade.
+LOCAL_DEFENCE_CLASSES = frozenset(
+    {"body armour", "helmet", "gloves", "boots", "shield", "buckler", "focus"}
+)
+# The stat families that are actually local on armour. Deliberately narrow: other stats carry
+# "(Local)" twins too (Accuracy Rating, Attack Speed), but those are weapon-local and must keep
+# resolving to their global id on armour.
+_LOCAL_DEFENCE_STAT = re.compile(r"\b(?:armour|evasion|energy shield|block chance)\b")
+_DEFENCE_HEADER = re.compile(
+    r"^(?:Armour|Evasion(?: Rating)?|Energy Shield)\s*:\s*\d+", re.IGNORECASE | re.MULTILINE
+)
+
+
+def carries_local_defences(item: ParsedItem) -> bool:
+    """True when this item's Armour/Evasion/Energy Shield affixes are local rather than global.
+
+    Decided by the item's own defence header ("Energy Shield: 476"), which only appears on gear
+    that has base defences, with the item class as a fallback for text that omits the header.
+    """
+    if item.item_class and item.item_class.strip().lower() in LOCAL_DEFENCE_CLASSES:
+        return True
+    return bool(_DEFENCE_HEADER.search(item.raw_text or ""))
+
+
 def build_query_plan(
     item: ParsedItem,
     catalog: StatCatalog,
@@ -508,6 +548,7 @@ def build_query_plan(
     ignored: list[str] = []
     unresolved: list[dict[str, Any]] = []
     explicit_locks = tuple(lock_patterns)
+    prefer_local = carries_local_defences(item)
     for modifier in item.modifiers:
         if _matches_any(modifier.text, ignore_patterns):
             ignored.append(modifier.text)
@@ -517,7 +558,7 @@ def build_query_plan(
         if item.rarity == "Unique" and modifier.domain == "unique" and not locked:
             ignored.append(modifier.text)
             continue
-        entry, reason = catalog.resolve(modifier)
+        entry, reason = catalog.resolve(modifier, prefer_local=prefer_local)
         if entry is None:
             unresolved.append(
                 {
