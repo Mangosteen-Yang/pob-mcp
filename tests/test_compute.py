@@ -1066,3 +1066,46 @@ def test_craft_item_beats_plain_rare(engine):
     assert (crafted["metricCrafted"] or 0) >= (plain["metricAfter"] or 0)
     c = crafted["crafting"]
     assert c["runes"] or c["essencesUsed"] or c["corruptedImplicit"]  # crafting actually engaged
+
+
+def test_build_xml_reads_equipped_items_whatever_the_attribute_order():
+    # The Lua side re-serialises with unstable attribute order, so the parser must not depend on
+    # it (a regex like `<Slot itemId="..."[^>]*name="..."` works on one export, not the next).
+    from server.compute import build_xml
+
+    a = (
+        '<PathOfBuilding><Items activeItemSet="1" showStatDifferences="true">'
+        '<Item id="7">Rarity: RARE\nGood Ring\nSapphire Ring<ModRange id="1" range="0.5"/></Item>'
+        '<ItemSet id="1" title="Default">'
+        '<Slot itemId="7" name="Ring 1"/><Slot itemId="0" name="Ring 2"/>'
+        "</ItemSet></Items></PathOfBuilding>"
+    )
+    b = a.replace('<Slot itemId="7" name="Ring 1"/>', '<Slot name="Ring 1" itemId="7"/>').replace(
+        '<Items activeItemSet="1" showStatDifferences="true">',
+        '<Items showStatDifferences="true" activeItemSet="1">',
+    )
+    for xml in (a, b):
+        equipped = build_xml.equipped_items(xml)
+        assert list(equipped) == ["Ring 1"]  # itemId="0" is an empty slot
+        assert "Sapphire Ring" in equipped["Ring 1"]
+
+
+def test_build_xml_uses_the_active_item_set():
+    from server.compute import build_xml
+
+    xml = (
+        '<PathOfBuilding><Items activeItemSet="2">'
+        '<Item id="1">Rarity: RARE\nA\nSapphire Ring</Item>'
+        '<Item id="2">Rarity: RARE\nB\nGold Ring</Item>'
+        '<ItemSet id="1"><Slot itemId="1" name="Ring 1"/></ItemSet>'
+        '<ItemSet id="2"><Slot itemId="2" name="Ring 1"/></ItemSet>'
+        "</Items></PathOfBuilding>"
+    )
+    assert "Gold Ring" in build_xml.equipped_items(xml)["Ring 1"]
+
+
+def test_build_xml_is_silent_on_junk():
+    from server.compute import build_xml
+
+    assert build_xml.equipped_items("not xml at all") == {}
+    assert build_xml.equipped_items("<PathOfBuilding/>") == {}
