@@ -20,6 +20,7 @@ from mcp.server.fastmcp import FastMCP
 from . import paths
 from . import scaffold
 from .compute.engine import PobEngine
+from .compute import build_xml
 from .compute import buildopt
 from .compute import craftopt
 from .compute import itemopt
@@ -394,8 +395,53 @@ def _base_and_affixes(raw: str) -> tuple[str | None, list[str], bool]:
         if corpus.get_item(s):
             base = s
             break
-    affixes = [ln.strip() for ln in body if ln.strip() and set(ln.strip()) != {"-"}]
+    affixes = _explicit_affix_lines(body)
     return base, affixes, is_unique
+
+
+_ITEM_HEADER_KEYS = (
+    "rarity:",
+    "item level:",
+    "quality:",
+    "sockets:",
+    "rune:",
+    "levelreq:",
+    "charm slots:",
+    "armour:",
+    "evasion:",
+    "evasion rating:",
+    "energy shield:",
+    "requires:",
+    "unique id:",
+    "item class:",
+)
+
+
+def _explicit_affix_lines(body: list[str]) -> list[str]:
+    """The EXPLICIT affix lines of a PoB item: no headers, implicits, rune/enchant lines or tags.
+
+    PoB writes "Implicits: N" followed by exactly N implicit lines; those are properties of the
+    base or its runes, not rolled affixes, so counting them as affixes would wrongly trip the
+    3-prefix/3-suffix and mod-group rules.
+    """
+    lines = [ln.strip() for ln in body if ln.strip() and set(ln.strip()) != {"-"}]
+    out: list[str] = []
+    skip_implicits = 0
+    for ln in lines:
+        low = ln.lower()
+        m = re.match(r"implicits:\s*(\d+)", low)
+        if m:
+            skip_implicits = int(m.group(1))
+            continue
+        if skip_implicits > 0:
+            skip_implicits -= 1
+            continue
+        if low.startswith(_ITEM_HEADER_KEYS) or low in {"corrupted", "mirrored", "split"}:
+            continue
+        if ln.startswith("{"):  # {enchant}/{rune}/{crafted} markup lines
+            continue
+        out.append(ln)
+    return out
 
 
 @mcp.tool()
@@ -416,13 +462,20 @@ def equip_item(raw: str, slot: str | None = None) -> dict[str, Any]:
         base, affixes, is_unique = _base_and_affixes(raw)
         if base and not is_unique:
             bad = corpus.illegal_affixes(base, affixes)
+            broken = corpus.affix_rule_violations(base, affixes)
+            problems: list[str] = []
             if bad:
                 res["illegalAffixes"] = bad
+                problems.append(f"{len(bad)} affix(es) do not roll on a {base} in PoE2")
+            if broken:
+                res["affixRuleViolations"] = broken
+                problems.append("; ".join(v["detail"] for v in broken))
+            if problems:
                 res["legalityWarning"] = (
-                    f"{len(bad)} affix(es) on this item do not roll on a {base} in PoE2, so the "
-                    "computed stats include invented mods and are NOT achievable on this base. "
-                    "Re-craft with real mods (optimize_item / parse_item / search_mods). "
-                    "Type-level check only — roll magnitudes aren't verified."
+                    " — ".join(problems) + ". The computed stats therefore describe an item that "
+                    "cannot exist, and are NOT achievable. Re-craft with real mods (optimize_item "
+                    "/ craft_item / search_mods). Affix type, count and mod-group are checked; "
+                    "roll magnitudes are not."
                 )
     except Exception:
         pass  # legality is advisory; never let it break an equip
@@ -487,6 +540,96 @@ def evaluate_build(goals: dict[str, Any]) -> dict[str, Any]:
         all_ok = all_ok and ok
         results.append({"stat": stat, "value": value, "min": lo, "max": hi, "ok": ok})
     return {"pass": all_ok, "results": results}
+
+
+@mcp.tool()
+def validate_build() -> dict[str, Any]:
+    """Check whether the active build is ATTAINABLE in game — the honesty gate before presenting.
+
+    `evaluate_build` asks "are the numbers good enough"; this asks "could this build exist at
+    all". Engine- and corpus-checked, it reports:
+      - **passive points** — tree spend vs. what the character's level grants (allocating a
+        distant node buys its whole path, which silently overspends);
+      - **ascendancy points** — the separate 8-point pool;
+      - **gear** — every equipped rare's affixes against the real mod pool: affixes that cannot
+        roll on that base, more than 3 prefixes / 3 suffixes, and two affixes sharing a
+        mutually-exclusive mod group;
+      - **custom mods** — author-added configTab mods that inflate stats beyond the gear;
+      - **resistances** — elemental (and chaos, unless Chaos Inoculation) below the 75% cap.
+
+    Returns `{valid, problems: [{kind, detail, ...}], checked}`. A build that fails this is
+    flagged, not recommended — its stats describe gear that cannot be obtained. Affix type,
+    count and mod-group are checked; roll magnitudes are not.
+    """
+    eng = get_engine()
+    problems: list[dict[str, Any]] = []
+    checked: list[str] = []
+
+    budget = _point_budget(eng)
+    checked.append("passive points")
+    if budget and not budget["withinBudget"]:
+        problems.append({"kind": "passive points", "detail": budget["warning"], **budget})
+
+    try:
+        build = eng.get_build()
+    except Exception:
+        build = {}
+
+    checked.append("ascendancy points")
+    if build.get("ascendancyNote"):
+        problems.append({"kind": "ascendancy points", "detail": build["ascendancyNote"]})
+
+    checked.append("custom mods")
+    custom = (build.get("customMods") or "").strip()
+    if custom:
+        problems.append(
+            {
+                "kind": "custom mods",
+                "detail": (
+                    "the build carries author-added custom mods (configTab), so its stats exceed "
+                    "what its gear and tree actually provide"
+                ),
+                "mods": custom,
+            }
+        )
+
+    checked.append("gear affixes")
+    try:
+        equipped = build_xml.equipped_items(eng.get_xml())
+    except Exception:
+        equipped = {}
+    for slot, raw in sorted(equipped.items()):
+        base, affixes, is_unique = _base_and_affixes(raw)
+        if not base or is_unique:
+            continue
+        for bad in corpus.illegal_affixes(base, affixes):
+            problems.append(
+                {"kind": "gear affix", "slot": slot, "base": base, "detail": bad["reason"], **bad}
+            )
+        for broken in corpus.affix_rule_violations(base, affixes):
+            problems.append({"kind": "gear affix", "slot": slot, "base": base, **broken})
+
+    checked.append("resistance caps")
+    try:
+        res = (eng.get_defenses() or {}).get("resistances") or {}
+    except Exception:
+        res = {}
+    elems = ["fire", "cold", "lightning"]
+    if "Chaos Inoculation" not in (build.get("keystones") or []):
+        elems.append("chaos")
+    under = [
+        f"{e} {res[e]}%" for e in elems if isinstance(res.get(e), (int, float)) and res[e] < 75
+    ]
+    if under:
+        problems.append(
+            {
+                "kind": "resistances",
+                "detail": f"below the 75% cap: {', '.join(under)}",
+                "uncapped": under,
+            }
+        )
+
+    return {"valid": not problems, "problems": problems, "checked": checked}
 
 
 @mcp.tool()
@@ -652,14 +795,46 @@ def get_passive(node: str | int) -> dict[str, Any]:
     return get_engine().get_passive(node)
 
 
+def _point_budget(eng: PobEngine) -> dict[str, Any] | None:
+    """The tree's passive-point budget: spent, granted by level, and whether it's over."""
+    try:
+        b = eng.get_build()
+        used, avail = b.get("pointsUsed"), b.get("pointsAvailable")
+        if not isinstance(used, int) or not isinstance(avail, int):
+            return None
+        out: dict[str, Any] = {
+            "pointsSpent": used,
+            "pointsGranted": avail,
+            "pointsOver": max(0, used - avail),
+            "withinBudget": used <= avail,
+        }
+        if used > avail:
+            out["warning"] = (
+                f"tree spends {used} passive points but level {b.get('level')} grants only "
+                f"{avail} ({used - avail} over budget) — this tree is NOT attainable as shown"
+            )
+        return out
+    except Exception:
+        return None  # advisory only; never break a mutator
+
+
+def _with_budget(res: dict[str, Any]) -> dict[str, Any]:
+    budget = _point_budget(get_engine())
+    if budget is not None and isinstance(res, dict):
+        res["pointBudget"] = budget
+    return res
+
+
 @mcp.tool()
 def alloc_passive(node: str | int) -> dict[str, Any]:
     """Allocate a passive node (and the shortest path to it) by id or name.
 
-    Returns points spent and the resulting stat deltas. Fails if the node isn't reachable
-    from the currently allocated tree.
+    Returns points spent, the resulting stat deltas, and a `pointBudget` showing the tree's
+    total spend against what the character's level grants — allocating a distant node (a jewel
+    socket, say) also buys every node on the path, which can silently push the tree over budget.
+    Fails if the node isn't reachable from the currently allocated tree.
     """
-    return get_engine().alloc_passive(node)
+    return _with_budget(get_engine().alloc_passive(node))
 
 
 @mcp.tool()
@@ -670,8 +845,9 @@ def dealloc_passive(node: str | int) -> dict[str, Any]:
     re-routes by SHORTEST path, which can take a different route than the one just removed. To
     probe a removal and put the tree back exactly as it was, snapshot with `get_xml` first and
     reload it — or use `rank_passive_contributions`, which measures removals without mutating.
+    Also returns a `pointBudget` (spend vs. what the level grants).
     """
-    return get_engine().dealloc_passive(node)
+    return _with_budget(get_engine().dealloc_passive(node))
 
 
 @mcp.tool()
@@ -738,16 +914,20 @@ def optimize_passives(
     0 = the FULL remaining passive budget (the usual intent — allocate the whole tree); pass a
     positive number only to CAP allocation. Ascendancy is a SEPARATE 8-point pool, auto-allocated on
     top regardless of `points`. Returns chosen nodes with per-step gains; `pointsRemaining` is the
-    build's TRUE unspent passive points. Bounded greedy search, not a global optimum.
+    build's TRUE unspent passive points, and `pointBudget` reports the tree's spend against what
+    the level grants (a `require`d distant node also buys its whole path). Bounded greedy search,
+    not a global optimum.
     """
-    return get_engine().optimize_passives(
-        metric=metric,
-        points=points,
-        node_type=node_type,
-        candidates=candidates,
-        goals=goals,
-        require=require,
-        reset=reset,
+    return _with_budget(
+        get_engine().optimize_passives(
+            metric=metric,
+            points=points,
+            node_type=node_type,
+            candidates=candidates,
+            goals=goals,
+            require=require,
+            reset=reset,
+        )
     )
 
 
