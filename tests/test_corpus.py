@@ -249,3 +249,45 @@ def test_search_mods_precision():
     assert all("physical" in m["text"].lower() for m in mods)
     inc = db.search_mods("increased physical damage", limit=5)
     assert any("physical damage" in m["text"].lower() for m in inc)
+
+
+def test_affix_rule_violations_flags_exclusive_mod_group():
+    # "+X to Level of all Spell Skills" and "+X to Level of all Physical Spell Skills" are both
+    # IncreaseSocketedGemLevel, so a staff can carry only one. The 2M reference build shipped a
+    # staff with three of them, and the type-level check could not see it.
+    bad = db.affix_rule_violations(
+        "Reaping Staff",
+        [
+            "+6 to Level of all Physical Spell Skills",
+            "+5 to Level of all Spell Skills",
+            "120% increased Spell Damage",
+        ],
+    )
+    assert any(v["rule"] == "mod group used more than once" for v in bad)
+
+
+def test_affix_rule_violations_flags_too_many_suffixes():
+    # A rare ring has at most 3 suffixes; four resist/utility suffixes cannot coexist.
+    bad = db.affix_rule_violations(
+        "Sapphire Ring",
+        [
+            "+95 to maximum Life",
+            "+36% to Cold Resistance",
+            "+22% to Chaos Resistance",
+            "19% increased Cast Speed",
+            "+13% to all Elemental Resistances",
+        ],
+    )
+    assert any(v["rule"] == "too many suffixes" for v in bad)
+
+
+def test_affix_rule_violations_accepts_a_legal_rare():
+    ok = db.affix_rule_violations(
+        "Sapphire Ring",
+        ["+95 to maximum Life", "+36% to Cold Resistance", "+22% to Chaos Resistance"],
+    )
+    assert ok == []
+
+
+def test_affix_rule_violations_unknown_base_is_silent():
+    assert db.affix_rule_violations("Not A Real Base", ["+95 to maximum Life"]) == []

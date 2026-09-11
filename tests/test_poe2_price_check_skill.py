@@ -102,9 +102,7 @@ def test_tiered_plan_locks_skill_level_and_runes_but_relaxes_other_mods() -> Non
         raw_text="",
         modifiers=[
             trade.ParsedModifier("+95 to maximum Life", "explicit", 95.0),
-            trade.ParsedModifier(
-                "+5 to Level of all Physical Spell Skills", "explicit", 5.0
-            ),
+            trade.ParsedModifier("+5 to Level of all Physical Spell Skills", "explicit", 5.0),
             trade.ParsedModifier("5% increased Movement Speed", "rune", 5.0),
         ],
     )
@@ -132,12 +130,8 @@ def test_search_query_contains_stats_rarity_and_corruption() -> None:
 
     assert payload["type"] == "Solar Amulet"
     assert payload["stats"][0]["filters"] == stats
-    assert payload["filters"]["type_filters"]["filters"]["rarity"] == {
-        "option": "rare"
-    }
-    assert payload["filters"]["misc_filters"]["filters"]["corrupted"] == {
-        "option": "true"
-    }
+    assert payload["filters"]["type_filters"]["filters"]["rarity"] == {"option": "rare"}
+    assert payload["filters"]["misc_filters"]["filters"]["corrupted"] == {"option": "true"}
 
 
 def test_rate_limiter_waits_once_for_longest_active_rule() -> None:
@@ -190,13 +184,7 @@ def test_price_summary_names_sample_median_accurately() -> None:
 def test_stat_catalog_cache_avoids_repeated_api_requests(tmp_path, monkeypatch) -> None:
     calls: list[str] = []
     payload = {
-        "result": [
-            {
-                "entries": [
-                    {"id": "explicit.stat_life", "text": "+# to maximum Life"}
-                ]
-            }
-        ]
+        "result": [{"entries": [{"id": "explicit.stat_life", "text": "+# to maximum Life"}]}]
     }
 
     def fake_request(url: str) -> tuple[dict[str, object], object]:
@@ -241,3 +229,115 @@ def test_unresolved_locked_modifier_blocks_market_search(monkeypatch) -> None:
     assert result["blocked_reason"] == "one or more locked modifiers could not be resolved"
     assert result["attempts"] == []
     assert result["query_plan"]["unresolved"][0]["locked"] is True
+
+
+def _es_catalog() -> object:
+    """Both Energy Shield entries the real Trade catalog carries: global and (Local)."""
+    return trade.StatCatalog.from_api(
+        {
+            "result": [
+                {
+                    "entries": [
+                        # Global — what a jewel/amulet rolls.
+                        {
+                            "id": "explicit.stat_3489782002",
+                            "text": "# to maximum Energy Shield",
+                        },
+                        # Local — what armour rolls; PoB writes it with identical wording.
+                        {
+                            "id": "explicit.stat_4052037485",
+                            "text": "# to maximum Energy Shield (Local)",
+                        },
+                        {"id": "explicit.stat_life", "text": "+# to maximum Life"},
+                    ]
+                }
+            ]
+        }
+    )
+
+
+def test_armour_energy_shield_resolves_to_the_local_stat() -> None:
+    # Regression: a body armour's "+65 to maximum Energy Shield" is a LOCAL mod. Resolving it to
+    # the global stat id matches nothing on Trade, so every ES-armour search returned zero hits.
+    body = trade.ParsedItem(
+        raw_text="Rarity: Rare\nBramble Shroud\nVile Robe\nEnergy Shield: 476\n",
+        item_class="Body Armour",
+        modifiers=[trade.ParsedModifier("+65 to maximum Energy Shield", "explicit", 65.0)],
+    )
+    plan = trade.build_query_plan(body, _es_catalog())
+    assert [f.stat_id for f in plan.resolved] == ["explicit.stat_4052037485"]
+    assert not plan.unresolved
+
+
+def test_non_armour_energy_shield_stays_global() -> None:
+    # An amulet has no defence header and no local defences: it must keep the global stat.
+    amulet = trade.ParsedItem(
+        raw_text="Rarity: Rare\nGrove Heart\nSolar Amulet\n",
+        item_class="Amulet",
+        modifiers=[trade.ParsedModifier("+60 to maximum Energy Shield", "explicit", 60.0)],
+    )
+    plan = trade.build_query_plan(amulet, _es_catalog())
+    assert [f.stat_id for f in plan.resolved] == ["explicit.stat_3489782002"]
+
+
+def test_local_defences_detected_from_the_defence_header() -> None:
+    # Item class is missing from plain PoB text, so the "Energy Shield: N" header decides.
+    headered = trade.ParsedItem(raw_text="Rarity: Rare\nX\nVile Robe\nEnergy Shield: 476\n")
+    assert trade.carries_local_defences(headered)
+    plain = trade.ParsedItem(raw_text="Rarity: Rare\nX\nSolar Amulet\n")
+    assert not trade.carries_local_defences(plain)
+
+
+def _mixed_local_catalog() -> object:
+    """Stats that have a "(Local)" twin. Only the defence one is local on ARMOUR — Accuracy
+    Rating and Attack Speed are weapon-local, and stay global on gloves/helmets."""
+    return trade.StatCatalog.from_api(
+        {
+            "result": [
+                {
+                    "entries": [
+                        {
+                            "id": "explicit.stat_3489782002",
+                            "text": "# to maximum Energy Shield",
+                        },
+                        {
+                            "id": "explicit.stat_4052037485",
+                            "text": "# to maximum Energy Shield (Local)",
+                        },
+                        {"id": "explicit.stat_803737631", "text": "# to Accuracy Rating"},
+                        {
+                            "id": "explicit.stat_691932474",
+                            "text": "# to Accuracy Rating (Local)",
+                        },
+                        {"id": "explicit.stat_681332047", "text": "#% increased Attack Speed"},
+                        {
+                            "id": "explicit.stat_210067635",
+                            "text": "#% increased Attack Speed (Local)",
+                        },
+                    ]
+                }
+            ]
+        }
+    )
+
+
+def test_armour_prefers_local_only_for_defence_stats() -> None:
+    # Regression: keying "prefer local" on the ITEM hijacked every stat with a "(Local)" twin.
+    # Accuracy and Attack Speed are WEAPON-local, so on gloves they must stay global — resolving
+    # them to the weapon-only local id queries a stat gloves cannot roll and returns zero hits.
+    gloves = trade.ParsedItem(
+        raw_text="Rarity: Rare\nThorn Grips\nJewelled Gloves\nEnergy Shield: 120\n",
+        item_class="Gloves",
+        modifiers=[
+            trade.ParsedModifier("+65 to maximum Energy Shield", "explicit", 65.0),
+            trade.ParsedModifier("+167 to Accuracy Rating", "explicit", 167.0),
+            trade.ParsedModifier("16% increased Attack Speed", "explicit", 16.0),
+        ],
+    )
+    plan = trade.build_query_plan(gloves, _mixed_local_catalog())
+    assert [f.stat_id for f in plan.resolved] == [
+        "explicit.stat_4052037485",  # energy shield -> LOCAL
+        "explicit.stat_803737631",  # accuracy      -> stays global
+        "explicit.stat_681332047",  # attack speed  -> stays global
+    ]
+    assert not plan.unresolved

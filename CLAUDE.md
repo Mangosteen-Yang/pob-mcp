@@ -117,7 +117,7 @@ uv sync                      # install deps
 uv run poe2-mcp              # run the MCP server locally
 uv run pytest                # run tests
 uv run ruff check . && uv run mypy server   # lint + types
-uv run python -m pipeline.build_db          # build corpus.sqlite locally
+uv run python -m pipeline.build_corpus      # build corpus.sqlite locally
 uv run python pob/spike.py                  # M0 headless spike harness
 ```
 

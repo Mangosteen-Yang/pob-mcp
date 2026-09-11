@@ -27,9 +27,10 @@ def test_workflow_prompts_registered():
 
 def test_tool_surface_intact():
     tools = asyncio.run(mcp.list_tools())
-    assert len(tools) == 65
+    assert len(tools) == 66
     names = {t.name for t in tools}
     assert {
+        "validate_build",
         "list_jewel_sockets",
         "rank_passive_contributions",
         "equip_jewel",
@@ -210,3 +211,117 @@ def test_server_version_matches_manifest():
 
     expected = json.loads((paths.BUNDLE_ROOT / "manifest.json").read_text())["version"]
     assert _server_version() == expected
+
+
+def test_explicit_affix_lines_skips_implicits_and_headers():
+    from server import main
+
+    body = [
+        "Energy Shield: 476",
+        "Item Level: 82",
+        "Quality: 20",
+        "Sockets: S S",
+        "Rune: Greater Storm Rune",
+        "LevelReq: 65",
+        "Implicits: 3",
+        "{enchant}{rune}Bonded: +40 to maximum Life",
+        "{enchant}{rune}Bonded: +40 to maximum Mana",
+        "{enchant}{rune}+36% to Lightning Resistance",
+        "+171 to maximum Life",
+        "+77 to maximum Energy Shield",
+        "Corrupted",
+    ]
+    assert main._explicit_affix_lines(body) == [
+        "+171 to maximum Life",
+        "+77 to maximum Energy Shield",
+    ]
+
+
+def test_equip_item_flags_affix_rule_violations(monkeypatch):
+    # A four-suffix ring is not craftable; the type-level check alone cannot see it.
+    from server import main
+
+    class _Stub:
+        def add_item(self, raw, slot=None):
+            return {"ok": True, "slot": slot or "Ring 1", "stats": {}}
+
+    monkeypatch.setattr(main, "get_engine", lambda: _Stub())
+    monkeypatch.setattr(main.corpus, "illegal_affixes", lambda base, affixes: [])
+    monkeypatch.setattr(
+        main.corpus,
+        "affix_rule_violations",
+        lambda base, affixes: [{"rule": "too many suffixes", "detail": "4 suffixes (max 3)"}],
+    )
+    res = main.equip_item("Rarity: Rare\nX\nSapphire Ring\n--------\n+95 to maximum Life")
+    assert res["affixRuleViolations"]
+    assert "4 suffixes" in res["legalityWarning"]
+
+
+def test_alloc_passive_reports_point_budget(monkeypatch):
+    from server import main
+
+    class _Stub:
+        def alloc_passive(self, node):
+            return {"ok": True, "node": node}
+
+        def get_build(self):
+            return {"pointsUsed": 148, "pointsAvailable": 115, "level": 92}
+
+    monkeypatch.setattr(main, "get_engine", lambda: _Stub())
+    res = main.alloc_passive(7960)
+    budget = res["pointBudget"]
+    assert budget["pointsOver"] == 33 and budget["withinBudget"] is False
+    assert "not attainable" in budget["warning"].lower()
+
+
+def test_validate_build_reports_attainability(monkeypatch):
+    from server import main
+
+    class _Stub:
+        def get_build(self):
+            return {
+                "pointsUsed": 148,
+                "pointsAvailable": 115,
+                "level": 92,
+                "customMods": "+111% to Fire Resistance",
+                "keystones": [],
+                "ascendancyNote": "Ascendancy is OVER budget: 9 allocated but only 8 exist",
+            }
+
+        def get_xml(self):
+            return "<PathOfBuilding></PathOfBuilding>"
+
+        def get_defenses(self):
+            return {"resistances": {"fire": 75, "cold": 75, "lightning": 40, "chaos": 75}}
+
+    monkeypatch.setattr(main, "get_engine", lambda: _Stub())
+    out = main.validate_build()
+    kinds = {p["kind"] for p in out["problems"]}
+    assert out["valid"] is False
+    assert {"passive points", "ascendancy points", "custom mods", "resistances"} <= kinds
+    assert any("lightning 40%" in p.get("detail", "") for p in out["problems"])
+
+
+def test_validate_build_passes_a_clean_build(monkeypatch):
+    from server import main
+
+    class _Stub:
+        def get_build(self):
+            return {
+                "pointsUsed": 113,
+                "pointsAvailable": 115,
+                "level": 92,
+                "customMods": "",
+                "keystones": [],
+            }
+
+        def get_xml(self):
+            return "<PathOfBuilding></PathOfBuilding>"
+
+        def get_defenses(self):
+            return {"resistances": {"fire": 75, "cold": 75, "lightning": 75, "chaos": 75}}
+
+    monkeypatch.setattr(main, "get_engine", lambda: _Stub())
+    out = main.validate_build()
+    assert out["valid"] is True and out["problems"] == []
+    assert "gear affixes" in out["checked"]

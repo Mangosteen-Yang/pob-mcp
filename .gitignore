@@ -29,3 +29,6 @@ Thumbs.db
 # Agent local
 work/
 outputs/
+
+# Claude Code local worktrees (nested checkouts, never source)
+.claude/worktrees/
